@@ -128,7 +128,14 @@ func encodeHEIF(rgba image.RGBA, options Options) ([]byte, error) {
 
 	defer C.heif_encoder_release(encoder)
 
-	errQ := C.heif_encoder_set_lossy_quality(encoder, C.int(options.ColorQuality))
+	// Set the image quality
+	var errQ C.struct_heif_error
+	if options.Quality < 100 {
+		errQ = C.heif_encoder_set_lossy_quality(encoder, C.int(options.Quality))
+	} else {
+		errQ = C.heif_encoder_set_lossless(encoder, C.int(1))
+	}
+
 	if errQ.code != C.heif_error_Ok {
 		return nil, fmt.Errorf("failed to set the image quality: %v", C.GoString(errQ.message))
 	}

@@ -9,14 +9,10 @@ import (
 
 // Options represent the configuration options for encoding a HEIC image.
 //
-//   - Speed: Controls the encoding speed, from 0-10. Higher values result in faster encoding but lower quality
-//     (default 6).
-//   - AlphaQuality: Specifies the quality of the alpha channel (transparency), from 0-100 (default 60).
-//   - ColorQuality: Specifies the quality of the color channels, from 0-100 (default 60).
+//   - Quality: Specifies the quality of the image, from 0-100, where 100 means lossless encoding. Higher values result
+//     in better quality but bigger images (default 60).
 type Options struct {
-	Speed        int
-	AlphaQuality int
-	ColorQuality int
+	Quality int
 }
 
 // Encode encodes an image into the HEIC format and writes it to the provided writer.
@@ -36,17 +32,11 @@ func Encode(writer io.Writer, img image.Image, options *Options) error {
 
 	// Set default values for options if they are not set
 	if options == nil {
-		options = &Options{Speed: 6, AlphaQuality: 60, ColorQuality: 60}
+		options = &Options{Quality: 60}
 	}
-
-	if options.Speed < 0 || options.Speed > 10 {
-		return fmt.Errorf("speed must be between 0 and 10")
-	}
-	if options.AlphaQuality < 0 || options.AlphaQuality > 100 {
-		return fmt.Errorf("alpha quality must be between 0 and 100")
-	}
-	if options.ColorQuality < 0 || options.ColorQuality > 100 {
-		return fmt.Errorf("color quality must be between 0 and 100")
+	
+	if options.Quality < 0 || options.Quality > 100 {
+		return fmt.Errorf("quality must be between 0 and 100")
 	}
 
 	data, err := encodeHEIF(*rgba, *options)
