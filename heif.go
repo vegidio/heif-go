@@ -4,12 +4,86 @@ package heif
 #include <stdlib.h>
 #include <string.h>
 #include <libheif/heif.h>
+
+// Full decode: reads HEIF data from memory, gets the primary image,
+// decodes it into an interleaved RGBA plane, and returns the heif_image*.
+// Also returns the heif_context* and heif_image_handle* for cleanup.
+struct heif_image* decode_heif_image(const uint8_t *data, size_t size,
+                              struct heif_context **outCtx,
+                              struct heif_image_handle **outHandle) {
+    struct heif_context* ctx = heif_context_alloc();
+    if (!ctx) return NULL;
+
+    struct heif_error err = heif_context_read_from_memory(ctx, data, size, NULL);
+    if (err.code != heif_error_Ok) {
+        heif_context_free(ctx);
+        return NULL;
+    }
+
+    struct heif_image_handle* handle = NULL;
+    err = heif_context_get_primary_image_handle(ctx, &handle);
+    if (err.code != heif_error_Ok) {
+        heif_context_free(ctx);
+        return NULL;
+    }
+
+    struct heif_image* img = NULL;
+    // ask for interleaved RGBA
+    err = heif_decode_image(handle, &img,
+                            heif_colorspace_RGB,
+                            heif_chroma_interleaved_RGBA,
+                            NULL);
+    if (err.code != heif_error_Ok) {
+        heif_image_handle_release(handle);
+        heif_context_free(ctx);
+        return NULL;
+    }
+
+    if (outCtx)    *outCtx    = ctx;
+    if (outHandle) *outHandle = handle;
+    return img;
+}
+
+// get_heif_config: reads just enough of the HEIF file to extract width/height.
+void get_heif_config(const uint8_t *data, size_t size,
+                     uint32_t *width, uint32_t *height) {
+    struct heif_context* ctx = heif_context_alloc();
+    if (!ctx) {
+        *width = 0;
+        *height = 0;
+        return;
+    }
+
+    struct heif_error err = heif_context_read_from_memory(ctx, data, size, NULL);
+    if (err.code != heif_error_Ok) {
+        *width = 0;
+        *height = 0;
+        heif_context_free(ctx);
+        return;
+    }
+
+    struct heif_image_handle* handle = NULL;
+    err = heif_context_get_primary_image_handle(ctx, &handle);
+    if (err.code != heif_error_Ok) {
+        *width = 0;
+        *height = 0;
+        heif_context_free(ctx);
+        return;
+    }
+
+    *width  = (uint32_t)heif_image_handle_get_width(handle);
+    *height = (uint32_t)heif_image_handle_get_height(handle);
+
+    heif_image_handle_release(handle);
+    heif_context_free(ctx);
+}
 */
 import "C"
 
 import (
 	"fmt"
 	"image"
+	"image/color"
 	"os"
 	"unsafe"
 )
@@ -96,4 +170,75 @@ func encodeHEIF(rgba image.RGBA, options Options) ([]byte, error) {
 	}
 
 	return data, nil
+}
+
+func decodeHEIFToRGBA(data []byte) (*image.RGBA, error) {
+	// Copy the Go slice into C memory
+	cData := C.CBytes(data)
+	defer C.free(cData)
+
+	// Call our C helper
+	var ctx *C.struct_heif_context
+	var handle *C.struct_heif_image_handle
+	img := C.decode_heif_image((*C.uint8_t)(cData), C.size_t(len(data)), &ctx, &handle)
+	if img == nil {
+		return nil, fmt.Errorf("failed to decode HEIF image")
+	}
+
+	// Query width/height from the interleaved plane
+	width := int(C.heif_image_get_width(img, C.heif_channel_interleaved))
+	height := int(C.heif_image_get_height(img, C.heif_channel_interleaved))
+
+	// Grab a pointer to the RGBA data and its stride
+	var cStride C.int
+	ptr := C.heif_image_get_plane_readonly(img, C.heif_channel_interleaved, &cStride)
+	rowBytes := int(cStride)
+
+	// Allocate our Go RGBA
+	goImg := image.NewRGBA(image.Rect(0, 0, width, height))
+
+	// Copy row by row (width*4 bytes per row)
+	for y := 0; y < height; y++ {
+		// compute an *unsafe.Pointer* to the start of row y
+		rowPtr := unsafe.Pointer(uintptr(unsafe.Pointer(ptr)) + uintptr(y*rowBytes))
+
+		// now pass that directly into C.GoBytes
+		chunk := C.GoBytes(rowPtr, C.int(width*4))
+
+		dstOff := y * goImg.Stride
+		copy(goImg.Pix[dstOff:dstOff+width*4], chunk)
+	}
+
+	// Cleanup C resources
+	C.heif_image_release(img)
+	C.heif_image_handle_release(handle)
+	C.heif_context_free(ctx)
+
+	return goImg, nil
+}
+
+// DecodeConfig reads enough of data to determine the image's configuration (dimensions, etc.).
+// Here we read the entire data and call a lightweight C function that only parses the header.
+func decodeConfig(data []byte) (image.Config, error) {
+	if len(data) == 0 {
+		return image.Config{}, fmt.Errorf("empty data buffer")
+	}
+
+	var w, h C.uint32_t
+	C.get_heif_config(
+		(*C.uint8_t)(unsafe.Pointer(&data[0])),
+		C.size_t(len(data)),
+		&w,
+		&h,
+	)
+
+	if w == 0 || h == 0 {
+		return image.Config{}, fmt.Errorf("failed to get HEIF image config")
+	}
+
+	return image.Config{
+		ColorModel: color.RGBAModel,
+		Width:      int(w),
+		Height:     int(h),
+	}, nil
 }

@@ -7,7 +7,7 @@ import (
 	"io"
 )
 
-// Options represents the configuration options for encoding an HEIC image.
+// Options represent the configuration options for encoding a HEIC image.
 //
 //   - Speed: Controls the encoding speed, from 0-10. Higher values result in faster encoding but lower quality
 //     (default 6).

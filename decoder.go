@@ -8,36 +8,36 @@ import (
 	"io"
 )
 
-// The init function registers the AVIF decoder with Go's image package.
-// The second argument ("????ftypavif" and "????ftypavis") are substrings expected in the file header.
-// "ftypavif" is for still images, while "ftypavis" is for image sequences.
+// The init function registers the HEIF decoder with Go's image package.
+// The second argument ("????ftypheic", "????ftypheix", etc) lists substrings expected in the file header.
 func init() {
-	image.RegisterFormat("avif", "????ftypavif", Decode, DecodeConfig)
-	image.RegisterFormat("avif", "????ftypavis", Decode, DecodeConfig)
+	image.RegisterFormat("heic", "????ftypheic", Decode, DecodeConfig)
+	image.RegisterFormat("heic", "????ftypheix", Decode, DecodeConfig)
+	image.RegisterFormat("heic", "????ftyphev1", Decode, DecodeConfig)
+	image.RegisterFormat("heic", "????ftyphevx", Decode, DecodeConfig)
+
 }
 
-// Decode reads AVIF image data from the provided io.Reader and decodes it into an image.Image.
+// Decode reads HEIF image data from the provided io.Reader and decodes it into an image.Image.
 //
 // It returns the decoded image or an error if the decoding process fails.
 func Decode(reader io.Reader) (image.Image, error) {
-	_, err := io.ReadAll(reader)
+	data, err := io.ReadAll(reader)
 	if err != nil {
-		return nil, fmt.Errorf("failed to decode AVIF data: %w", err)
+		return nil, fmt.Errorf("failed to decode HEIF data: %w", err)
 	}
-	//return decodeAVIFToRGBA(data)
-	return nil, nil
+	return decodeHEIFToRGBA(data)
 }
 
-// DecodeConfig reads the configuration of an AVIF image from the provided io.Reader.
+// DecodeConfig reads the configuration of a HEIF image from the provided io.Reader.
 //
 // It returns an image.Config containing the width, height, and color model of the image, or an error if the
 // configuration cannot be determined.
 func DecodeConfig(reader io.Reader) (image.Config, error) {
-	_, err := io.ReadAll(reader)
+	data, err := io.ReadAll(reader)
 	if err != nil {
-		return image.Config{}, fmt.Errorf("failed get config of AVIF data: %w", err)
+		return image.Config{}, fmt.Errorf("failed get config of HEIC data: %w", err)
 	}
 
-	//return decodeConfig(data)
-	return image.Config{}, nil
+	return decodeConfig(data)
 }
