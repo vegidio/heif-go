@@ -1,3 +1,4 @@
+// Package heif is a Go library and CLI tool to encode/decode HEIF/HEIC images without system dependencies (CGO).
 package heif
 
 /*
