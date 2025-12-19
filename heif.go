@@ -40,16 +40,29 @@ static struct heif_error writer_write(struct heif_context* ctx, const void* data
     return err;
 }
 
+// Constants
+#define INITIAL_BUFFER_SIZE (64 * 1024)
+#define BYTES_PER_PIXEL 4
+
 // Encode HEIF image to memory buffer
-uint8_t* encode_heif_to_memory(struct heif_context* ctx, size_t* out_size) {
+uint8_t* encode_heif_to_memory(struct heif_context* ctx, size_t* out_size, size_t estimated_size) {
+    if (!ctx || !out_size) {
+        if (out_size) *out_size = 0;
+        return NULL;
+    }
+
     memory_writer writer;
-    writer.data = (uint8_t*)malloc(64 * 1024); // Start with 64KB
+    // Use estimated size or default initial buffer size
+    size_t initial_capacity = estimated_size > 0 && estimated_size < INITIAL_BUFFER_SIZE
+                              ? estimated_size : INITIAL_BUFFER_SIZE;
+
+    writer.data = (uint8_t*)malloc(initial_capacity);
     if (!writer.data) {
         *out_size = 0;
         return NULL;
     }
     writer.size = 0;
-    writer.capacity = 64 * 1024;
+    writer.capacity = initial_capacity;
 
     struct heif_writer heif_writer;
     heif_writer.writer_api_version = 1;
@@ -72,6 +85,11 @@ uint8_t* encode_heif_to_memory(struct heif_context* ctx, size_t* out_size) {
 struct heif_image* decode_heif_image(const uint8_t *data, size_t size,
                               struct heif_context **outCtx,
                               struct heif_image_handle **outHandle) {
+    // Validate input parameters
+    if (!data || size == 0) {
+        return NULL;
+    }
+
     struct heif_context* ctx = heif_context_alloc();
     if (!ctx) return NULL;
 
@@ -108,6 +126,13 @@ struct heif_image* decode_heif_image(const uint8_t *data, size_t size,
 // get_heif_config: reads just enough of the HEIF file to extract width/height.
 void get_heif_config(const uint8_t *data, size_t size,
                      uint32_t *width, uint32_t *height) {
+    // Validate input parameters
+    if (!data || size == 0 || !width || !height) {
+        if (width) *width = 0;
+        if (height) *height = 0;
+        return;
+    }
+
     struct heif_context* ctx = heif_context_alloc();
     if (!ctx) {
         *width = 0;
@@ -148,12 +173,32 @@ import (
 	"unsafe"
 )
 
+const (
+	minQuality      = 0
+	maxQuality      = 100
+	bytesPerPixel   = 4
+	losslessQuality = 100
+)
+
 func encodeHEIF(rgba image.RGBA, options Options) ([]byte, error) {
 	width := rgba.Bounds().Dx()
 	height := rgba.Bounds().Dy()
 
+	// Validate dimensions
+	if width <= 0 || height <= 0 {
+		return nil, fmt.Errorf("invalid image dimensions: %dx%d", width, height)
+	}
+
+	// Validate quality
+	if options.Quality < minQuality || options.Quality > maxQuality {
+		return nil, fmt.Errorf("quality must be between %d and %d, got %d", minQuality, maxQuality, options.Quality)
+	}
+
 	// Create the libheif context
 	ctx := C.heif_context_alloc()
+	if ctx == nil {
+		return nil, fmt.Errorf("failed to allocate HEIF context")
+	}
 	defer C.heif_context_free(ctx)
 
 	// Create an heicImage for the output
@@ -164,7 +209,6 @@ func encodeHEIF(rgba image.RGBA, options Options) ([]byte, error) {
 	if errCreate.code != C.heif_error_Ok {
 		return nil, fmt.Errorf("failed to create HEIC image: %v", C.GoString(errCreate.message))
 	}
-
 	defer C.heif_image_release(heicImage)
 
 	// Allocate the RGBA plane (8 bits)
@@ -185,12 +229,11 @@ func encodeHEIF(rgba image.RGBA, options Options) ([]byte, error) {
 	if errEnc.code != C.heif_error_Ok {
 		return nil, fmt.Errorf("failed to create HEIC encoder: %v", C.GoString(errEnc.message))
 	}
-
 	defer C.heif_encoder_release(encoder)
 
 	// Set the image quality
 	var errQ C.struct_heif_error
-	if options.Quality < 100 {
+	if options.Quality < losslessQuality {
 		errQ = C.heif_encoder_set_lossy_quality(encoder, C.int(options.Quality))
 	} else {
 		errQ = C.heif_encoder_set_lossless(encoder, C.int(1))
@@ -206,12 +249,12 @@ func encodeHEIF(rgba image.RGBA, options Options) ([]byte, error) {
 	if errImg.code != C.heif_error_Ok {
 		return nil, fmt.Errorf("failed to encode HEIC image: %v", C.GoString(errImg.message))
 	}
-
 	defer C.heif_image_handle_release(handle)
 
-	// Encode to memory directly
+	// Encode to memory directly with size estimate
+	estimatedSize := C.size_t(width * height * bytesPerPixel / 10) // rough estimate: 10% of raw size
 	var size C.size_t
-	cData := C.encode_heif_to_memory(ctx, &size)
+	cData := C.encode_heif_to_memory(ctx, &size, estimatedSize)
 	if cData == nil {
 		return nil, fmt.Errorf("failed to encode HEIF image to memory")
 	}
@@ -224,7 +267,11 @@ func encodeHEIF(rgba image.RGBA, options Options) ([]byte, error) {
 }
 
 func decodeHEIFToRGBA(data []byte) (*image.RGBA, error) {
-	// Copy the Go slice into C memory
+	if len(data) == 0 {
+		return nil, fmt.Errorf("empty data buffer")
+	}
+
+	// Pin the data to prevent GC relocation
 	cData := C.CBytes(data)
 	defer C.free(cData)
 
@@ -235,10 +282,17 @@ func decodeHEIFToRGBA(data []byte) (*image.RGBA, error) {
 	if img == nil {
 		return nil, fmt.Errorf("failed to decode HEIF image")
 	}
+	defer C.heif_image_release(img)
+	defer C.heif_image_handle_release(handle)
+	defer C.heif_context_free(ctx)
 
 	// Query width/height from the interleaved plane
 	width := int(C.heif_image_get_width(img, C.heif_channel_interleaved))
 	height := int(C.heif_image_get_height(img, C.heif_channel_interleaved))
+
+	if width <= 0 || height <= 0 {
+		return nil, fmt.Errorf("invalid decoded image dimensions: %dx%d", width, height)
+	}
 
 	// Grab a pointer to the RGBA data and its stride
 	var cStride C.int
@@ -248,22 +302,15 @@ func decodeHEIFToRGBA(data []byte) (*image.RGBA, error) {
 	// Allocate our Go RGBA
 	goImg := image.NewRGBA(image.Rect(0, 0, width, height))
 
-	// Copy row by row (width*4 bytes per row)
+	// Direct memory copy - more efficient than row-by-row with intermediate allocation
+	rowSize := width * bytesPerPixel
 	for y := 0; y < height; y++ {
-		// compute an *unsafe.Pointer* to the start of row y
-		rowPtr := unsafe.Pointer(uintptr(unsafe.Pointer(ptr)) + uintptr(y*rowBytes))
-
-		// now pass that directly into C.GoBytes
-		chunk := C.GoBytes(rowPtr, C.int(width*4))
-
+		srcPtr := unsafe.Pointer(uintptr(unsafe.Pointer(ptr)) + uintptr(y*rowBytes))
 		dstOff := y * goImg.Stride
-		copy(goImg.Pix[dstOff:dstOff+width*4], chunk)
+		// Direct unsafe copy using unsafe.Slice
+		srcSlice := unsafe.Slice((*byte)(srcPtr), rowSize)
+		copy(goImg.Pix[dstOff:dstOff+rowSize], srcSlice)
 	}
-
-	// Cleanup C resources
-	C.heif_image_release(img)
-	C.heif_image_handle_release(handle)
-	C.heif_context_free(ctx)
 
 	return goImg, nil
 }
@@ -275,9 +322,13 @@ func decodeConfig(data []byte) (image.Config, error) {
 		return image.Config{}, fmt.Errorf("empty data buffer")
 	}
 
+	// Pin the data to prevent GC relocation
+	cData := C.CBytes(data)
+	defer C.free(cData)
+
 	var w, h C.uint32_t
 	C.get_heif_config(
-		(*C.uint8_t)(unsafe.Pointer(&data[0])),
+		(*C.uint8_t)(cData),
 		C.size_t(len(data)),
 		&w,
 		&h,
