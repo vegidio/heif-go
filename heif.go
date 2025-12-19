@@ -6,6 +6,66 @@ package heif
 #include <string.h>
 #include <libheif/heif.h>
 
+// Memory writer structure to capture encoded HEIF data
+typedef struct {
+    uint8_t* data;
+    size_t size;
+    size_t capacity;
+} memory_writer;
+
+// Writer callback: appends data to our growing buffer
+static struct heif_error writer_write(struct heif_context* ctx, const void* data, size_t size, void* userdata) {
+    memory_writer* writer = (memory_writer*)userdata;
+
+    // Grow buffer if needed
+    if (writer->size + size > writer->capacity) {
+        size_t new_capacity = writer->capacity * 2;
+        if (new_capacity < writer->size + size) {
+            new_capacity = writer->size + size;
+        }
+        uint8_t* new_data = (uint8_t*)realloc(writer->data, new_capacity);
+        if (!new_data) {
+            struct heif_error err = {heif_error_Memory_allocation_error, heif_suberror_Unspecified, "Out of memory"};
+            return err;
+        }
+        writer->data = new_data;
+        writer->capacity = new_capacity;
+    }
+
+    // Append data
+    memcpy(writer->data + writer->size, data, size);
+    writer->size += size;
+
+    struct heif_error err = {heif_error_Ok, heif_suberror_Unspecified, "Success"};
+    return err;
+}
+
+// Encode HEIF image to memory buffer
+uint8_t* encode_heif_to_memory(struct heif_context* ctx, size_t* out_size) {
+    memory_writer writer;
+    writer.data = (uint8_t*)malloc(64 * 1024); // Start with 64KB
+    if (!writer.data) {
+        *out_size = 0;
+        return NULL;
+    }
+    writer.size = 0;
+    writer.capacity = 64 * 1024;
+
+    struct heif_writer heif_writer;
+    heif_writer.writer_api_version = 1;
+    heif_writer.write = writer_write;
+
+    struct heif_error err = heif_context_write(ctx, &heif_writer, &writer);
+    if (err.code != heif_error_Ok) {
+        free(writer.data);
+        *out_size = 0;
+        return NULL;
+    }
+
+    *out_size = writer.size;
+    return writer.data;
+}
+
 // Full decode: reads HEIF data from memory, gets the primary image,
 // decodes it into an interleaved RGBA plane, and returns the heif_image*.
 // Also returns the heif_context* and heif_image_handle* for cleanup.
@@ -85,7 +145,6 @@ import (
 	"fmt"
 	"image"
 	"image/color"
-	"os"
 	"unsafe"
 )
 
@@ -117,8 +176,8 @@ func encodeHEIF(rgba image.RGBA, options Options) ([]byte, error) {
 	// Copy the pixels
 	var stride C.int
 	ptr := C.heif_image_get_plane(heicImage, C.heif_channel_interleaved, &stride)
-	size := C.size_t(stride) * C.size_t(height)
-	C.memcpy(unsafe.Pointer(ptr), unsafe.Pointer(&rgba.Pix[0]), size)
+	planeSize := C.size_t(stride) * C.size_t(height)
+	C.memcpy(unsafe.Pointer(ptr), unsafe.Pointer(&rgba.Pix[0]), planeSize)
 
 	// Pick & configure HEVC encoder
 	var encoder *C.struct_heif_encoder
@@ -150,32 +209,16 @@ func encodeHEIF(rgba image.RGBA, options Options) ([]byte, error) {
 
 	defer C.heif_image_handle_release(handle)
 
-	// Write the output to a temporary file
-	// TODO: This is a temporary solution because libheif seems to be very happy write the output to a file, instead of
-	//       writing it to a buffer. I will need to investigate this further on how to write the output to memory.
-	tmp, err := os.CreateTemp("", "heif-go-*.heic")
-	if err != nil {
-		return nil, err
+	// Encode to memory directly
+	var size C.size_t
+	cData := C.encode_heif_to_memory(ctx, &size)
+	if cData == nil {
+		return nil, fmt.Errorf("failed to encode HEIF image to memory")
 	}
+	defer C.free(unsafe.Pointer(cData))
 
-	// Close and delete the temp file
-	tmpName := tmp.Name()
-	tmp.Close()
-	defer os.Remove(tmpName)
-
-	cName := C.CString(tmpName)
-	defer C.free(unsafe.Pointer(cName))
-
-	errW := C.heif_context_write_to_file(ctx, cName)
-	if errW.code != C.heif_error_Ok {
-		return nil, fmt.Errorf("failed to write temp file: %v", C.GoString(errW.message))
-	}
-
-	// Slurp it back into memory
-	data, err := os.ReadFile(tmpName)
-	if err != nil {
-		return nil, err
-	}
+	// Copy C memory to Go slice
+	data := C.GoBytes(unsafe.Pointer(cData), C.int(size))
 
 	return data, nil
 }
