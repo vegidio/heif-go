@@ -93,7 +93,7 @@ struct heif_image* decode_heif_image(const uint8_t *data, size_t size,
     struct heif_context* ctx = heif_context_alloc();
     if (!ctx) return NULL;
 
-    struct heif_error err = heif_context_read_from_memory(ctx, data, size, NULL);
+    struct heif_error err = heif_context_read_from_memory_without_copy(ctx, data, size, NULL);
     if (err.code != heif_error_Ok) {
         heif_context_free(ctx);
         return NULL;
@@ -140,7 +140,7 @@ void get_heif_config(const uint8_t *data, size_t size,
         return;
     }
 
-    struct heif_error err = heif_context_read_from_memory(ctx, data, size, NULL);
+    struct heif_error err = heif_context_read_from_memory_without_copy(ctx, data, size, NULL);
     if (err.code != heif_error_Ok) {
         *width = 0;
         *height = 0;
@@ -218,9 +218,9 @@ func encodeHEIF(rgba image.RGBA, options Options) ([]byte, error) {
 	}
 
 	// Copy the pixels
-	var stride C.int
-	ptr := C.heif_image_get_plane(heicImage, C.heif_channel_interleaved, &stride)
-	planeSize := C.size_t(stride) * C.size_t(height)
+	var stride C.size_t
+	ptr := C.heif_image_get_plane2(heicImage, C.heif_channel_interleaved, &stride)
+	planeSize := stride * C.size_t(height)
 	C.memcpy(unsafe.Pointer(ptr), unsafe.Pointer(&rgba.Pix[0]), planeSize)
 
 	// Pick & configure HEVC encoder
@@ -295,8 +295,8 @@ func decodeHEIFToRGBA(data []byte) (*image.RGBA, error) {
 	}
 
 	// Grab a pointer to the RGBA data and its stride
-	var cStride C.int
-	ptr := C.heif_image_get_plane_readonly(img, C.heif_channel_interleaved, &cStride)
+	var cStride C.size_t
+	ptr := C.heif_image_get_plane_readonly2(img, C.heif_channel_interleaved, &cStride)
 	rowBytes := int(cStride)
 
 	// Allocate our Go RGBA
