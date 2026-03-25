@@ -170,6 +170,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"runtime"
 	"unsafe"
 )
 
@@ -180,18 +181,13 @@ const (
 	losslessQuality = 100
 )
 
-func encodeHEIF(rgba image.RGBA, options Options) ([]byte, error) {
+func encodeHEIF(rgba *image.RGBA, options Options) ([]byte, error) {
 	width := rgba.Bounds().Dx()
 	height := rgba.Bounds().Dy()
 
 	// Validate dimensions
 	if width <= 0 || height <= 0 {
 		return nil, fmt.Errorf("invalid image dimensions: %dx%d", width, height)
-	}
-
-	// Validate quality
-	if options.Quality < minQuality || options.Quality > maxQuality {
-		return nil, fmt.Errorf("quality must be between %d and %d, got %d", minQuality, maxQuality, options.Quality)
 	}
 
 	// Create the libheif context
@@ -217,11 +213,18 @@ func encodeHEIF(rgba image.RGBA, options Options) ([]byte, error) {
 		return nil, fmt.Errorf("failed to add RGBA plane to HEIC image: %v", C.GoString(errPlane.message))
 	}
 
-	// Copy the pixels
+	// Copy the pixels row-by-row to handle stride differences between Go and libheif
 	var stride C.size_t
 	ptr := C.heif_image_get_plane2(heicImage, C.heif_channel_interleaved, &stride)
-	planeSize := stride * C.size_t(height)
-	C.memcpy(unsafe.Pointer(ptr), unsafe.Pointer(&rgba.Pix[0]), planeSize)
+	goStride := rgba.Stride
+	cStride := int(stride)
+	rowSize := width * bytesPerPixel
+
+	for y := 0; y < height; y++ {
+		srcOff := y * goStride
+		dstPtr := unsafe.Pointer(uintptr(unsafe.Pointer(ptr)) + uintptr(y*cStride))
+		C.memcpy(dstPtr, unsafe.Pointer(&rgba.Pix[srcOff]), C.size_t(rowSize))
+	}
 
 	// Pick & configure HEVC encoder
 	var encoder *C.struct_heif_encoder
@@ -252,7 +255,7 @@ func encodeHEIF(rgba image.RGBA, options Options) ([]byte, error) {
 	defer C.heif_image_handle_release(handle)
 
 	// Encode to memory directly with size estimate
-	estimatedSize := C.size_t(width * height * bytesPerPixel / 10) // rough estimate: 10% of raw size
+	estimatedSize := C.size_t(width) * C.size_t(height) * C.size_t(bytesPerPixel) / 10 // rough estimate: 10% of raw size
 	var size C.size_t
 	cData := C.encode_heif_to_memory(ctx, &size, estimatedSize)
 	if cData == nil {
@@ -271,15 +274,15 @@ func decodeHEIFToRGBA(data []byte) (*image.RGBA, error) {
 		return nil, fmt.Errorf("empty data buffer")
 	}
 
-	// Pin the data to prevent GC relocation
-	cData := C.CBytes(data)
-	defer C.free(cData)
+	// Pass Go slice directly to C; KeepAlive ensures GC won't collect it during C usage
+	cData := unsafe.Pointer(&data[0])
 
 	// Call our C helper
 	var ctx *C.struct_heif_context
 	var handle *C.struct_heif_image_handle
 	img := C.decode_heif_image((*C.uint8_t)(cData), C.size_t(len(data)), &ctx, &handle)
 	if img == nil {
+		runtime.KeepAlive(data)
 		return nil, fmt.Errorf("failed to decode HEIF image")
 	}
 	defer C.heif_image_release(img)
@@ -291,6 +294,7 @@ func decodeHEIFToRGBA(data []byte) (*image.RGBA, error) {
 	height := int(C.heif_image_get_height(img, C.heif_channel_interleaved))
 
 	if width <= 0 || height <= 0 {
+		runtime.KeepAlive(data)
 		return nil, fmt.Errorf("invalid decoded image dimensions: %dx%d", width, height)
 	}
 
@@ -302,16 +306,24 @@ func decodeHEIFToRGBA(data []byte) (*image.RGBA, error) {
 	// Allocate our Go RGBA
 	goImg := image.NewRGBA(image.Rect(0, 0, width, height))
 
-	// Direct memory copy - more efficient than row-by-row with intermediate allocation
+	// Copy decoded RGBA data into Go image
 	rowSize := width * bytesPerPixel
-	for y := 0; y < height; y++ {
-		srcPtr := unsafe.Pointer(uintptr(unsafe.Pointer(ptr)) + uintptr(y*rowBytes))
-		dstOff := y * goImg.Stride
-		// Direct unsafe copy using unsafe.Slice
-		srcSlice := unsafe.Slice((*byte)(srcPtr), rowSize)
-		copy(goImg.Pix[dstOff:dstOff+rowSize], srcSlice)
+	if rowBytes == goImg.Stride && rowSize == rowBytes {
+		// Strides match — single bulk copy
+		totalBytes := rowSize * height
+		srcSlice := unsafe.Slice((*byte)(unsafe.Pointer(ptr)), totalBytes)
+		copy(goImg.Pix[:totalBytes], srcSlice)
+	} else {
+		for y := 0; y < height; y++ {
+			srcPtr := unsafe.Pointer(uintptr(unsafe.Pointer(ptr)) + uintptr(y*rowBytes))
+			dstOff := y * goImg.Stride
+			srcSlice := unsafe.Slice((*byte)(srcPtr), rowSize)
+			copy(goImg.Pix[dstOff:dstOff+rowSize], srcSlice)
+		}
 	}
 
+	// Keep data alive until after all C resources referencing it are freed (via defers above)
+	runtime.KeepAlive(data)
 	return goImg, nil
 }
 
@@ -322,9 +334,8 @@ func decodeConfig(data []byte) (image.Config, error) {
 		return image.Config{}, fmt.Errorf("empty data buffer")
 	}
 
-	// Pin the data to prevent GC relocation
-	cData := C.CBytes(data)
-	defer C.free(cData)
+	// Pass Go slice directly to C; get_heif_config frees its own resources before returning
+	cData := unsafe.Pointer(&data[0])
 
 	var w, h C.uint32_t
 	C.get_heif_config(
@@ -333,6 +344,7 @@ func decodeConfig(data []byte) (image.Config, error) {
 		&w,
 		&h,
 	)
+	runtime.KeepAlive(data)
 
 	if w == 0 || h == 0 {
 		return image.Config{}, fmt.Errorf("failed to get HEIF image config")

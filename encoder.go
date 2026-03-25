@@ -25,21 +25,24 @@ type Options struct {
 // Returns:
 //   - An error if encoding or writing fails, otherwise nil.
 func Encode(writer io.Writer, img image.Image, options *Options) error {
-	// Convert the image to RGBA
-	bounds := img.Bounds()
-	rgba := image.NewRGBA(bounds)
-	draw.Draw(rgba, rgba.Bounds(), img, bounds.Min, draw.Src)
+	// Reuse input if already a standard RGBA image; otherwise convert
+	rgba, ok := img.(*image.RGBA)
+	if !ok || rgba.Stride != rgba.Bounds().Dx()*4 {
+		bounds := img.Bounds()
+		rgba = image.NewRGBA(bounds)
+		draw.Draw(rgba, rgba.Bounds(), img, bounds.Min, draw.Src)
+	}
 
 	// Set default values for options if they are not set
 	if options == nil {
 		options = &Options{Quality: 60}
 	}
-	
-	if options.Quality < 0 || options.Quality > 100 {
-		return fmt.Errorf("quality must be between 0 and 100")
+
+	if options.Quality < minQuality || options.Quality > maxQuality {
+		return fmt.Errorf("quality must be between %d and %d", minQuality, maxQuality)
 	}
 
-	data, err := encodeHEIF(*rgba, *options)
+	data, err := encodeHEIF(rgba, *options)
 	if err != nil {
 		return err
 	}

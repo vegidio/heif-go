@@ -15,7 +15,6 @@ func init() {
 	image.RegisterFormat("heic", "????ftypheix", Decode, DecodeConfig)
 	image.RegisterFormat("heic", "????ftyphev1", Decode, DecodeConfig)
 	image.RegisterFormat("heic", "????ftyphevx", Decode, DecodeConfig)
-
 }
 
 // Decode reads HEIF image data from the provided io.Reader and decodes it into an image.Image.
@@ -36,7 +35,7 @@ func Decode(reader io.Reader) (image.Image, error) {
 func DecodeConfig(reader io.Reader) (image.Config, error) {
 	data, err := io.ReadAll(reader)
 	if err != nil {
-		return image.Config{}, fmt.Errorf("failed get config of HEIC data: %w", err)
+		return image.Config{}, fmt.Errorf("failed to get config of HEIC data: %w", err)
 	}
 
 	return decodeConfig(data)

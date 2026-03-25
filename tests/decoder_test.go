@@ -92,7 +92,7 @@ func TestDecodeConfig(t *testing.T) {
 		config, err := heif.DecodeConfig(reader)
 
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "failed get config of HEIC data")
+		assert.Contains(t, err.Error(), "failed to get config of HEIC data")
 		assert.Equal(t, image.Config{}, config)
 	})
 }
